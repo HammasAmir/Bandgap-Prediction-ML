@@ -1,0 +1,363 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{float}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\begin{document}
+
+\title{A Comparative Analysis of Classical Machine Learning Models for Band Gap Prediction in Energy-Critical Inorganic Materials}
+
+\author{
+  \IEEEauthorblockN{Syeda Reeda Fatima Naqvi}
+  \IEEEauthorblockA{33932}
+  \and
+  \IEEEauthorblockN{Hammas Amir Khan}
+  \IEEEauthorblockA{33936}
+  \and
+  \IEEEauthorblockN{Shaheryar Khan Zai}
+  \IEEEauthorblockA{33944}
+}
+
+
+\maketitle
+
+\begin{abstract}
+Identifying materials with suitable electronic band gaps is a foundational problem in computational materials science, with direct relevance to photovoltaics, semiconductors, and energy storage. High-fidelity computational methods such as density functional theory (DFT) can compute band gaps accurately but are prohibitively expensive at scale. This work presents a supervised machine learning pipeline trained on 49,476 insulating compounds drawn from the Materials Project database, using 132 compositional features generated via the Magpie featurization scheme. A four-stage feature selection pipeline (variance filtering, pairwise correlation pruning, mutual information ranking, and Lasso-based selection) reduced the feature space from 132 to 46 informative descriptors, after which polynomial feature engineering produced an augmented set of 111 features. Four regression models were evaluated: Ridge regression, Random Forest (RF), Gradient Boosting (GBM), and Extreme Gradient Boosting (XGBoost). XGBoost achieved the best test-set performance with a mean absolute error of 0.443~eV and $R^2 = 0.812$, outperforming composition-only baselines reported in the literature. Linear models were found to underfit due to the non-linear structure of the band gap landscape, while tree-based ensembles captured interactions between elemental properties effectively. SHAP analysis identified d-orbital valence electron filling and electronegativity as the dominant predictors of band gap magnitude---features consistent with established semiconductor physics. The study discusses model limitations and concrete directions for improvement, including two-stage classification-regression architectures and structure-informed features.
+\end{abstract}
+
+\begin{IEEEkeywords}
+band gap prediction, supervised learning, XGBoost, gradient boosting, Magpie features, SHAP, Materials Project, compositional descriptors
+\end{IEEEkeywords}
+
+% -----------------------------------------------------------------
+\section{Introduction}
+% -----------------------------------------------------------------
+
+The band gap of a material determines whether it behaves as a metal, semiconductor, or insulator, and directly governs its suitability for applications such as solar cells, light-emitting diodes, and transistors. Optimal photovoltaic absorbers, for instance, require band gaps in the range 1.1--1.7~eV to match the solar spectrum, a window that encompasses only a small fraction of known inorganic compounds \cite{shockley1961}.
+
+Traditional approaches to band gap calculation rely on DFT within the generalized gradient approximation (GGA-PBE), which systematically underestimates gaps by 30--50\% relative to experiment. Higher-fidelity methods (hybrid functionals, GW approximation) bring computed values closer to measurement but raise computational cost by one to two orders of magnitude \cite{perdew1996}. Neither approach scales to the hundreds of thousands of candidate compositions required for high-throughput materials screening.
+
+Machine learning offers a path around this bottleneck. By training on computed band gaps from large databases, a learned model can predict the gap for a new composition in milliseconds, enabling rapid pre-screening before expensive DFT calculations are invoked \cite{ward2016}. This study implements and evaluates such a pipeline, with the following contributions:
+
+\begin{itemize}
+  \item A reproducible four-stage feature selection pipeline that reduces 132 Magpie descriptors to 46 non-redundant predictors, followed by polynomial feature engineering.
+  \item A systematic comparison of a linear baseline (Ridge) and three ensemble regressors (RF, GBM, XGBoost) on the filtered and engineered feature sets.
+  \item Post-hoc interpretability analysis using SHAP, linking the model's learned feature importances to known physical determinants of band gap.
+  \item Honest discussion of model limitations and a concrete roadmap for further improvement.
+\end{itemize}
+
+% -----------------------------------------------------------------
+\section{Related Work}
+% -----------------------------------------------------------------
+
+Several prior studies have applied machine learning to band gap prediction at the composition level. Ward et al.\ introduced the Magpie featurization scheme and demonstrated that random forests trained on elemental property statistics achieve mean absolute errors near 0.45~eV on Materials Project data, establishing an informal benchmark for composition-only models \cite{ward2016}. Zhuo et al.\ proposed a gradient boosting pipeline with additional physics-inspired features and reported MAE values around 0.30--0.40~eV, though this required careful feature construction guided by domain knowledge \cite{zhuo2018}.
+
+Graph neural networks operating directly on crystal structures substantially outperform composition-only methods. CGCNN \cite{xie2018} and MEGNet \cite{chen2019} achieve MAE values below 0.35~eV by encoding bond lengths and angles, information that is absent from compositional representations. This gap in performance defines the theoretical ceiling that composition-only approaches can aspire to.
+
+The present work does not attempt to surpass GNN baselines; rather, it constructs a complete, auditable supervised learning pipeline using the methods taught in the course and uses gradient-boosted ensembles as a practical upper bound for this feature regime.
+
+% -----------------------------------------------------------------
+\section{Dataset and Featurization}
+% -----------------------------------------------------------------
+
+\subsection{Data Source}
+
+The dataset was obtained through the \texttt{matminer} library \cite{ward2018matminer}, specifically the \texttt{matbench\_mp\_gap} benchmark, which contains DFT-computed (PBE functional) band gaps for 106,113 inorganic compounds from the Materials Project. The target variable is the PBE band gap in electron volts (eV).
+
+\subsection{Preprocessing}
+
+A known issue in the raw dataset is the large spike of metallic compounds with a recorded gap of exactly 0~eV; these account for approximately 43.5\% of the raw database. Including these in a regression task introduces a qualitatively different prediction problem (metal/insulator classification) and inflates model error metrics. Following standard practice in the literature, samples with band gap $\leq 0.5$~eV were excluded, yielding 49,476 insulating and semiconducting compounds. This filter also removes PBE-computed semi-metals whose true gap is likely non-zero but computed incorrectly by DFT.
+
+After filtering, the target distribution spans 0.50 to 9.72~eV. Approximately 15.8\% of the retained samples fall within the photovoltaic window of 1.1--1.7~eV.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\columnwidth]{fig1_eda_distribution.jpg}
+  \caption{Band gap distribution. Left: full database distribution showing a large metallic peak at 0~eV. Centre: filtered insulator distribution (gap $>$ 0.5~eV) with the photovoltaic window highlighted. Right: class balance in the original dataset (metals vs.\ insulators).}
+  \label{fig:eda_dist}
+\end{figure}
+
+\subsection{Featurization}
+
+Compositions were converted to 132 numerical features using the Magpie (Materials Agnostic Platform for Informatics and Exploration) preset from \texttt{matminer}. For each of 22 elemental properties (atomic number, electronegativity, atomic radius, etc.), six statistics are computed over the stoichiometry-weighted distribution of constituent elements: minimum, maximum, range, mean, mean absolute deviation, and mode. Elemental properties used include atomic weight, Mendeleev number, melting point, electronegativity, covalent radius, valence-electron counts, and ground-state band gap, among others.
+
+The dataset was split 70/15/15 into training, validation, and test sets (random seed 42), yielding 34,632 training, 7,422 validation, and 7,422 test samples.
+
+% -----------------------------------------------------------------
+\section{Feature Selection Pipeline}
+% -----------------------------------------------------------------
+
+A four-stage pipeline was applied to the 132 Magpie features to reduce redundancy and remove uninformative descriptors. The pipeline was fitted exclusively on training data and applied identically to validation and test sets.
+
+\subsection{Stage 1: Variance Threshold}
+
+Features with near-zero variance carry no discriminative information. A variance threshold of 0.1 (applied to raw, unscaled features) removed 20 constant or near-constant features, reducing the set from 132 to 112. Note that this filter must be applied before standardisation; after \texttt{StandardScaler}, all features have unit variance and the filter becomes ineffective.
+
+\subsection{Stage 2: Pairwise Correlation Pruning}
+
+Highly correlated feature pairs contribute redundant information and can destabilise linear model coefficients. From each pair with Pearson $|r| > 0.85$, the second-indexed feature was dropped. This step reduced the feature count from 112 to 64. The threshold of 0.85 was selected by evaluating the validation MAE of an XGBoost proxy model at thresholds of 0.85, 0.90, and 0.95.
+
+\subsection{Stage 3: Mutual Information Ranking}
+
+Pearson correlation captures only linear associations and may discard features whose relationship with the target is non-linear. Mutual information (MI) \cite{kraskov2004} measures the reduction in uncertainty about the target given knowledge of a feature, regardless of the functional form. MI was computed on a 20,000-sample subsample of the training set, and the top 60 features by MI score were retained.
+
+\subsection{Stage 4: Lasso-Based Selection}
+
+A final embedded selection step applied Lasso regression ($\ell_1$ regularisation, $\alpha = 0.005$) to the 60 MI-ranked features. Lasso shrinks the coefficients of uninformative features to exactly zero, providing a model-driven final filter. This step removed 14 features, yielding a final set of 46 descriptors.
+
+Figure~\ref{fig:mi_features} shows the top 20 features by MI score after correlation filtering, while Figure~\ref{fig:pearson} shows the top features by Pearson correlation. Several features exhibit weak linear correlation despite high mutual information, motivating the use of non-linear models. Electronegativity statistics, d-orbital valence-electron counts, and melting-temperature descriptors rank highly---consistent with the physical intuition that charge-transfer characteristics and orbital occupancy determine gap magnitude.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\columnwidth]{fig2_mi_features.png}
+  \caption{Top 20 features ranked by mutual information score with the band gap target. Electronegativity-related and valence-electron descriptors rank highest, reflecting the dominant role of charge transfer and orbital occupancy in determining band gap magnitude.}
+  \label{fig:mi_features}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\columnwidth]{fig3_feature_correlation.png}
+  \caption{Top 20 features by Pearson correlation with the band gap. Red bars indicate positive correlation; blue bars indicate negative correlation. Several features show only weak linear correlation despite high mutual information, motivating the use of non-linear models.}
+  \label{fig:pearson}
+\end{figure}
+
+The full selection pipeline summary is shown in Table~\ref{tab:pipeline}.
+
+\begin{table}[H]
+  \centering
+  \caption{Feature Selection Pipeline Summary}
+  \label{tab:pipeline}
+  \begin{tabular}{lcc}
+    \toprule
+    \textbf{Stage} & \textbf{Features} & \textbf{Criterion} \\
+    \midrule
+    Raw Magpie & 132 & --- \\
+    Variance Filter & 112 & Var $> 0.1$ \\
+    Correlation Filter & 64  & Pearson $|r| < 0.85$ \\
+    Mutual Information & 60  & Top-60 by MI \\
+    Lasso Selection & 46  & $\alpha = 0.005$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Feature Engineering}
+
+To allow models to access non-linear combinations of the most informative descriptors explicitly, degree-2 polynomial features were generated from the top 10 MI-ranked descriptors, producing 65 additional interaction and squared terms. Combining these with the 46 selected features yields an augmented ``full'' feature set of 111 features. Two feature sets were therefore carried forward into modelling: the 46-feature \emph{Selected} set and the 111-feature \emph{Full} set.
+
+Figure~\ref{fig:pipeline_effect} shows the impact of each selection stage. The leftmost panel reports the feature count remaining after each step (132 $\rightarrow$ 112 $\rightarrow$ 64 $\rightarrow$ 60 $\rightarrow$ 46); the centre and right panels track validation MAE for Ridge and XGBoost proxy models, respectively. XGBoost MAE rises only marginally across stages, confirming that the removed features were largely redundant, whereas Ridge degrades more visibly as the correlated features it relies on are pruned.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\columnwidth]{fig4_selection_pipeline.png}
+  \caption{Feature selection pipeline diagnostics. Left: feature count remaining after each stage. Centre: Ridge validation MAE through the pipeline. Right: XGBoost validation MAE through the pipeline. XGBoost performance is nearly flat, confirming the pruned features were redundant for the tree-based model.}
+  \label{fig:pipeline_effect}
+\end{figure}
+
+% -----------------------------------------------------------------
+\section{Models and Methodology}
+% -----------------------------------------------------------------
+
+\subsection{Model Selection Rationale}
+
+Four supervised regressors were selected to span a range of model complexity and inductive bias:
+
+\begin{itemize}
+  \item \textbf{Ridge Regression}: Linear model with $\ell_2$ regularisation. Provides an interpretable baseline and is expected to underfit if band gap--feature relationships are non-linear.
+  \item \textbf{Random Forest (RF)}: Ensemble of decision trees trained on bootstrapped subsets of data, aggregated by averaging. Captures non-linearities and pairwise feature interactions without explicit feature engineering.
+  \item \textbf{Gradient Boosting (GBM)}: Sequential ensemble that fits each new tree to the residuals of the current ensemble. Typically more accurate than RF on structured data but more sensitive to hyperparameter choices.
+  \item \textbf{Extreme Gradient Boosting (XGBoost)}: A regularised, high-performance gradient boosting implementation that adds $\ell_1$/$\ell_2$ penalties on leaf weights and supports column subsampling, reducing overfitting relative to standard GBM while retaining its expressive power.
+\end{itemize}
+
+\subsection{Training Protocol}
+
+All features were standardised using \texttt{StandardScaler} fitted on training data only (scaling primarily benefits the linear model; the tree-based models are scale-invariant). Hyperparameters were selected based on validation MAE through grid and sweep searches:
+
+\begin{itemize}
+  \item Ridge: $\alpha = 1.0$.
+  \item RF: 200 trees, max depth = 10, min samples per leaf = 10.
+  \item GBM: 100 estimators, learning rate = 0.05, max depth = 5.
+  \item XGBoost: max depth = 8, subsample = 0.8, learning rate = 0.05, with $\ell_1$/$\ell_2$ regularisation on leaf weights.
+\end{itemize}
+
+Each model was evaluated on both the Selected (46) and Full (111) feature sets, and the better-performing set was retained per model. Performance was evaluated on the held-out test set using Mean Absolute Error (MAE), Root Mean Squared Error (RMSE), and the coefficient of determination ($R^2$). The test set was not accessed during any training or model selection step.
+
+% -----------------------------------------------------------------
+\section{Results}
+% -----------------------------------------------------------------
+
+\subsection{Model Performance}
+
+Table~\ref{tab:results} summarises test-set performance for all four models. XGBoost (on the Full feature set) achieves the lowest test MAE (0.443~eV) and highest $R^2$ (0.812), followed by Gradient Boosting (MAE = 0.513~eV, $R^2 = 0.760$) and Random Forest (MAE = 0.578~eV, $R^2 = 0.703$). The Ridge baseline performs substantially worse (MAE = 0.856~eV, $R^2 = 0.439$), indicating that the band gap landscape is strongly non-linear in the Magpie feature space.
+
+\begin{table}[H]
+  \centering
+  \caption{Test Set Performance of All Models}
+  \label{tab:results}
+  \begin{tabular}{lccc}
+    \toprule
+    \textbf{Model} & \textbf{Train MAE} & \textbf{Test MAE} & \textbf{$R^2$} \\
+    \midrule
+    Ridge               & 0.862 & 0.856 & 0.439 \\
+    Random Forest       & 0.544 & 0.578 & 0.703 \\
+    Gradient Boosting   & 0.467 & 0.513 & 0.760 \\
+    \textbf{XGBoost}    & \textbf{0.356} & \textbf{0.443} & \textbf{0.812} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Figure~\ref{fig:baseline_comparison} compares all four models across both feature sets (Selected and Full) at the baseline stage, before model-specific tuning. Even untuned, the tree-based ensembles clearly separate from the Ridge baseline, and the choice of feature set has only a marginal effect on the tree models---confirming that they are robust to the redundant features that the Selected set removes.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\columnwidth]{fig5_model_comparison.png}
+  \caption{Baseline validation performance for all four models on the Selected (46) and Full (111) feature sets. Left: validation MAE. Right: validation $R^2$. Tree-based models are largely insensitive to feature set, while Ridge benefits modestly from the engineered Full set.}
+  \label{fig:baseline_comparison}
+\end{figure}
+
+A five-fold cross-validation of the tuned XGBoost model on the full dataset confirmed the stability of this result, yielding MAE $= 0.445 \pm 0.005$~eV and $R^2 = 0.815 \pm 0.004$, consistent with the held-out test performance.
+
+\subsection{XGBoost Tuning and Prediction Quality}
+
+The best model, XGBoost, was tuned via a grid search over tree depth and subsampling ratio. Figure~\ref{fig:xgb_results} (left) shows that validation MAE improves monotonically with depth, reaching its minimum at depth~8 with subsampling~1.0. The centre panel shows the predicted vs.\ actual band gap scatter on the test set ($R^2 = 0.812$): predictions track the identity line closely, with increasing scatter above 4~eV where high-gap oxides and fluorides are underrepresented in the training distribution. The right panel ranks the model's top~15 native feature importances, led by maximum \texttt{NdValence}, mode \texttt{MeltingT}, and mode \texttt{Electronegativity}.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\columnwidth]{fig6_XGboost_results.png}
+  \caption{XGBoost results. Left: validation MAE over the depth\,$\times$\,subsample grid (minimum at depth~8). Centre: predicted vs.\ actual band gap on the test set; the dashed red line is the identity. Right: top~15 native XGBoost feature importances. Train MAE $=0.356$, Test MAE $=0.443$, $R^2 = 0.812$.}
+  \label{fig:xgb_results}
+\end{figure}
+
+\subsection{Feature Importance and Interpretation}
+
+To interpret the trained XGBoost model in a model-agnostic way, SHAP (SHapley Additive exPlanations) \cite{lundberg2017shap} values were computed on a 2{,}000-sample subset of the test set. Figure~\ref{fig:shap} ranks features by mean absolute SHAP value (left) and shows the per-sample impact distribution (right). The dominant predictors are the maximum and mean d-orbital valence-electron counts (\texttt{NdValence}), mean electronegativity, and engineered interaction terms combining melting temperature with electronegativity.
+
+These rankings align with established semiconductor physics. The filling of d-orbitals strongly influences whether electrons occupy energy levels at the band edges, governing the transition between metallic and insulating behaviour. Electronegativity differences control the ionic character of bonding: highly electronegative constituents bind electrons tightly, producing wider gaps. The prominence of melting-temperature interaction terms reflects bond strength, which correlates with the energy required to excite electrons across the gap. Notably, the model recovered these physically meaningful relationships from data alone, without any physics being explicitly encoded.
+
+The overlap between the top-10 MI features and the top-10 SHAP features was low (2 of 10). This is expected and informative: the SHAP rankings are partly dominated by engineered polynomial interaction terms that did not exist when MI was computed, indicating that the model actively exploits the engineered non-linear features.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\columnwidth]{fig8_SHAP_analysis.png}
+  \caption{SHAP analysis of the XGBoost model. Left: global importance (mean absolute SHAP value), ordered with the most important feature at the top. Right: per-sample SHAP dot plot; colour indicates feature value (pink = high, blue = low) and horizontal position indicates the impact on the predicted band gap. D-orbital valence filling and electronegativity dominate.}
+  \label{fig:shap}
+\end{figure}
+
+\subsection{Comparison with Literature Benchmarks}
+
+Table~\ref{tab:benchmarks} places our results in the context of published composition-only and structure-aware models. Our XGBoost result (MAE = 0.443~eV) surpasses the informal composition-only random-forest baseline of Ward et al.\ \cite{ward2016} and approaches the physics-augmented gradient boosting result of Zhuo et al.\ \cite{zhuo2018}. The remaining gap to GNN-based models underscores the information lost by ignoring crystal structure.
+
+\begin{table}[H]
+  \centering
+  \caption{Comparison with Published Baselines}
+  \label{tab:benchmarks}
+  \begin{tabular}{llc}
+    \toprule
+    \textbf{Method} & \textbf{Feature Type} & \textbf{MAE (eV)} \\
+    \midrule
+    Ridge (this work)       & Composition & 0.856 \\
+    RF (this work)          & Composition & 0.578 \\
+    GBM (this work)         & Composition & 0.513 \\
+    \textbf{XGBoost (this work)} & \textbf{Composition} & \textbf{0.443} \\
+    Ward et al.\ \cite{ward2016} (RF) & Composition & $\approx$0.45 \\
+    Zhuo et al.\ \cite{zhuo2018} (GBM) & Composition & $\approx$0.35 \\
+    CGCNN \cite{xie2018}    & Crystal structure & $\approx$0.29 \\
+    MEGNet \cite{chen2019}  & Crystal structure & $\approx$0.28 \\
+    DFT (PBE vs.\ exp.)     & --- & 0.5--1.0 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% -----------------------------------------------------------------
+\section{Discussion}
+% -----------------------------------------------------------------
+
+\subsection{Why Linear Models Fail}
+
+The Ridge baseline ($R^2 \approx 0.44$) shows a near-zero gap between training and test MAE, indicating underfitting rather than overfitting: the model is not powerful enough to capture the structure of the data, not merely generalising poorly. This is consistent with the known physical picture. Band gap magnitude depends on orbital hybridisation, crystal field splitting, and spin-orbit coupling---interactions that manifest as highly non-linear functions of elemental statistics. Electronegativity differences and atomic radii ratios can strongly modulate gap values, and these multiplicative/ratio-type relationships are not representable by a linear combination of raw features. The substantial jump in performance from Ridge to the tree-based ensembles directly confirms this.
+
+\subsection{Overfitting in XGBoost}
+
+XGBoost shows the largest train--test MAE gap of any model (0.356 vs.\ 0.443~eV, a gap of $-0.088$), flagged by our diagnostic as moderate overfitting. This is characteristic of deep gradient-boosted trees (max depth = 8) on tabular data: the model has substantial capacity and partially memorises the training set. Despite this gap, XGBoost still achieves the best test-set generalisation of all models, and the five-fold cross-validation result confirms the test performance is not a fortunate split. Tightening regularisation (lower max depth, stronger $\ell_1$/$\ell_2$ penalties, or a lower learning rate with more estimators) would likely narrow the gap at a small cost to test MAE. In contrast, Random Forest and GBM were diagnosed as good fits, with train--test gaps below 0.05~eV.
+
+\subsection{Limitations of the Feature Set}
+
+All models in this study operate solely on composition. Two classes of information that would substantially improve prediction are absent:
+
+\begin{enumerate}
+  \item \textbf{Crystal structure}: Bond lengths, coordination environments, and space group symmetry encode information that composition cannot reconstruct. For polymorphs (e.g., wurtzite vs.\ zinc-blende GaN), the band gap differs significantly despite identical composition.
+  \item \textbf{Spin-orbit and relativistic effects}: Heavy elements with large atomic numbers (Pb, Bi, Hg) have strongly spin-orbit-coupled band structures. Magpie captures atomic number as a feature but cannot encode its \emph{effect} on electronic structure without structural context.
+\end{enumerate}
+
+Additionally, because the model is trained on PBE band gaps, its predictions inherit the systematic 30--50\% underestimation of PBE relative to experiment. Predicted values should therefore be interpreted as PBE-scale gaps, and any photovoltaic screening window must be adjusted accordingly.
+
+\subsection{The Metal Spike Problem}
+
+By excluding samples with gap $\leq 0.5$~eV, this study sidesteps a fundamental challenge. A production-grade pipeline should classify compositions as metallic or insulating first, then apply the regression model only to predicted insulators. This two-stage architecture would eliminate the ambiguity caused by PBE's tendency to spuriously close gaps in near-metallic systems and would likely improve regression performance on the insulating sub-population.
+
+% -----------------------------------------------------------------
+\section{Conclusion}
+% -----------------------------------------------------------------
+
+This study demonstrates a complete supervised learning pipeline for band gap prediction using only compositional descriptors. Starting from 132 Magpie features and 49,476 insulating compounds from the Materials Project, a four-stage feature selection pipeline reduced the feature set to 46 informative descriptors, which were augmented to 111 features through polynomial engineering. Among four evaluated models, XGBoost achieved the best test-set performance: MAE = 0.443~eV and $R^2 = 0.812$, surpassing published composition-only random-forest baselines.
+
+The Ridge baseline consistently underfitted the data, confirming that non-linear feature interactions are essential for this problem. Tree-based ensembles captured these interactions effectively, and SHAP analysis confirmed that the best model's predictions are driven by physically meaningful quantities---d-orbital valence filling and electronegativity---recovered from data alone. The models nonetheless remain below the accuracy of structure-aware graph neural networks, reflecting the information lost by ignoring crystal structure.
+
+Future work should prioritise three directions: (1) a two-stage metal/insulator classifier followed by regression on the insulating subset, (2) SHAP-guided feature engineering that constructs additional physically motivated ratio and product features, and (3) addition of structural descriptors (site symmetry, bond length statistics) to approach GNN-level accuracy at lower computational cost.
+
+% -----------------------------------------------------------------
+\begin{thebibliography}{99}
+
+\bibitem{shockley1961}
+W.~Shockley and H.~J. Queisser, ``Detailed balance limit of efficiency of p-n junction solar cells,'' \emph{J. Appl. Phys.}, vol.~32, no.~3, pp.~510--519, 1961.
+
+\bibitem{perdew1996}
+J.~P. Perdew, K.~Burke, and M.~Ernzerhof, ``Generalized gradient approximation made simple,'' \emph{Phys. Rev. Lett.}, vol.~77, no.~18, pp.~3865--3868, 1996.
+
+\bibitem{ward2016}
+L.~Ward, A.~Agrawal, A.~Choudhary, and C.~Wolverton, ``A general-purpose machine learning framework for predicting properties of inorganic materials,'' \emph{npj Comput. Mater.}, vol.~2, p.~16028, 2016.
+
+\bibitem{zhuo2018}
+Y.~Zhuo, A.~Mansouri Tehrani, and J.~Brgoch, ``Predicting the band gaps of inorganic solids by machine learning,'' \emph{J. Phys. Chem. Lett.}, vol.~9, no.~7, pp.~1668--1673, 2018.
+
+\bibitem{xie2018}
+T.~Xie and J.~C. Grossman, ``Crystal graph convolutional neural networks for an accurate and interpretable prediction of material properties,'' \emph{Phys. Rev. Lett.}, vol.~120, no.~14, p.~145301, 2018.
+
+\bibitem{chen2019}
+C.~Chen, W.~Ye, Y.~Zuo, C.~Zheng, and S.~P. Ong, ``Graph networks as a universal machine learning framework for molecules and crystals,'' \emph{Chem. Mater.}, vol.~31, no.~9, pp.~3564--3572, 2019.
+
+\bibitem{ward2018matminer}
+L.~Ward \emph{et al.}, ``Matminer: An open source toolkit for materials data mining,'' \emph{Comput. Mater. Sci.}, vol.~152, pp.~60--69, 2018.
+
+\bibitem{kraskov2004}
+A.~Kraskov, H.~Stoegbauer, and P.~Grassberger, ``Estimating mutual information,'' \emph{Phys. Rev. E}, vol.~69, no.~6, p.~066138, 2004.
+
+\bibitem{chen2016xgboost}
+T.~Chen and C.~Guestrin, ``XGBoost: A scalable tree boosting system,'' in \emph{Proc. 22nd ACM SIGKDD Int. Conf. Knowledge Discovery and Data Mining}, 2016, pp.~785--794.
+
+\bibitem{lundberg2017shap}
+S.~M. Lundberg and S.-I. Lee, ``A unified approach to interpreting model predictions,'' in \emph{Adv. Neural Inf. Process. Syst.}, vol.~30, 2017.
+
+\bibitem{pedregosa2011}
+F.~Pedregosa \emph{et al.}, ``Scikit-learn: Machine learning in Python,'' \emph{J. Mach. Learn. Res.}, vol.~12, pp.~2825--2830, 2011.
+
+\bibitem{jain2013}
+A.~Jain \emph{et al.}, ``Commentary: The Materials Project: A materials genome approach to accelerating materials innovation,'' \emph{APL Mater.}, vol.~1, no.~1, p.~011002, 2013.
+
+\end{thebibliography}
+
+\end{document}
